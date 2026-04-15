@@ -1,0 +1,85 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/robots/clearpath/pr2/protos/Pr2.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/floors/protos/Floor.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/appearances/protos/Parquetry.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/solids/protos/SolidBox.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/tables/protos/Table.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/drinks/protos/Can.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/kitchen/breakfast/protos/BiscuitBox.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/appearances/protos/BrushedAluminium.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/appearances/protos/Roughcast.proto"
+
+WorldInfo {
+  title "Lab 7 — PR2 Warehouse Pick and Place"
+  basicTimeStep 32
+}
+
+Viewpoint {
+  orientation -0.35 0.15 0.92 2.4
+  position 3 -16 16
+}
+
+TexturedBackground { texture "empty_office" }
+TexturedBackgroundLight { }
+
+# ── Floor ────────────────────────────────────────────────────────────────────
+Floor {
+  translation 0 0 0
+  size 14 14
+  tileSize 1 1
+  appearance Parquetry { }
+}
+
+# ── Outer walls ───────────────────────────────────────────────────────────────
+Solid { translation  0  7 1.25 children [Shape { appearance Roughcast { } geometry Box { size 14 0.2 2.5 } }] boundingObject Box { size 14 0.2 2.5 } locked TRUE name "wall_n" }
+Solid { translation  0 -7 1.25 children [Shape { appearance Roughcast { } geometry Box { size 14 0.2 2.5 } }] boundingObject Box { size 14 0.2 2.5 } locked TRUE name "wall_s" }
+Solid { translation -7  0 1.25 children [Shape { appearance Roughcast { } geometry Box { size 0.2 14 2.5 } }] boundingObject Box { size 0.2 14 2.5 } locked TRUE name "wall_w" }
+Solid { translation  7  0 1.25 children [Shape { appearance Roughcast { } geometry Box { size 0.2 14 2.5 } }] boundingObject Box { size 0.2 14 2.5 } locked TRUE name "wall_e" }
+
+# ── Pick Table 1 — south-west: robot approaches from north ────────────────────
+Table { translation -3 -4 0 name "pick_table_1" }
+DEF OBJECT_1 BiscuitBox {
+  translation -3 -3.3 0.77
+  rotation 0 0 1 0
+}
+
+# ── Pick Table 2 — south-east: robot approaches from north ───────────────────
+Table { translation 3 -4 0 name "pick_table_2" }
+DEF OBJECT_2 Can {
+  translation 3 -3.3 0.805
+  rotation 0 0 1 0
+}
+
+# ── Place Table — north area: robot approaches from south ────────────────────
+Table { translation 0 5 0 name "place_table" }
+
+# ── Obstacle boxes — force robot to navigate around them ──────────────────────
+SolidBox { translation -2  0  0.5 size 0.6 0.6 1.0 appearance BrushedAluminium { } name "obs1" }
+SolidBox { translation  2  0  0.5 size 0.6 0.6 1.0 appearance BrushedAluminium { } name "obs2" }
+SolidBox { translation -3.5 -1.5 0.5 size 0.6 0.6 1.0 appearance BrushedAluminium { } name "obs3" }
+SolidBox { translation  0  -1.5 0.5 size 0.6 0.6 1.0 appearance BrushedAluminium { } name "obs4" }
+SolidBox { translation  3.5 -1.5 0.5 size 0.6 0.6 1.0 appearance BrushedAluminium { } name "obs5" }
+SolidBox { translation  0  -2.8 0.5 size 0.6 0.6 1.0 appearance BrushedAluminium { } name "obs6" }
+
+# ── Inner wall segments — create corridors ────────────────────────────────────
+Solid { translation  5 1 0.75 children [Shape { appearance Roughcast { } geometry Box { size 0.2 6 1.5 } }] boundingObject Box { size 0.2 6 1.5 } locked TRUE name "wall_inner_e" }
+Solid { translation -5 1 0.75 children [Shape { appearance Roughcast { } geometry Box { size 0.2 6 1.5 } }] boundingObject Box { size 0.2 6 1.5 } locked TRUE name "wall_inner_w" }
+
+# ── Supervisor (writes robot_pose.json) ───────────────────────────────────────
+Robot {
+  name "lab7_supervisor"
+  controller "lab7_supervisor"
+  supervisor TRUE
+  translation 0 0 0
+  children [ Emitter { channel 1 } ]
+}
+
+# ── PR2 — starts at (0, 1) facing south ──────────────────────────────────────
+DEF PR2 Pr2 {
+  translation 0 1 0
+  rotation 0 0 1 -1.5708
+  controller "lab7_pr2"
+}
