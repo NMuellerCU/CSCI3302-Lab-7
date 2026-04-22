@@ -1,6 +1,8 @@
 import json, math, os
 import numpy as np
 from controller import Robot, Supervisor
+import heapq
+import matplotlib.pyplot as plt
 # ══════════════════════════════════════════════════════════════════════════════
 # PR2 ARM KINEMATICS  (do not modify)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -28,7 +30,8 @@ PR2_JOINT_LIMITS = [
 GRIPPER_OFFSET = 0.18    # metres from wrist to gripper fingertip along Z
 ARM_BASE_XY    = np.array([-0.05, -0.188])   # right shoulder in robot body frame (x,y)
 ARM_BASE_Z     = 1.07    # shoulder height (metres) when torso = 0.33 m
-
+MAP_SIZE = [14, 14]
+MAP_CENTER = [7, 7]
 # ══════════════════════════════════════════════════════════════════════════════
 # NAVIGATION CONSTANTS  (do not modify)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -133,7 +136,184 @@ def gradient_descent_ik(target, q0=None, alpha=0.5, tol=0.008, max_iter=4000):
 def compute_potential_field(robot_x, robot_y, goal_x, goal_y, lidar_ranges, lidar_fov):
     raise NotImplementedError("TODO 4: Implement compute_potential_field(...)")
 
+# ALL CODE HERE IS TAKEN FROM hw4_template
+def h_euclidean(a, b):
+    return np.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2)
 
+def astar(grid, start, goal, heuristic):
+    start = start
+    goal = goal
+    g = {start: 0.0}
+    came_from = {}
+    heap = [(heuristic(start, goal), 0, start)]
+    expanded = []
+    eid = 0
+    while heap:
+        _, _, current = heapq.heappop(heap)
+        if current in [e for e in expanded]:
+            continue
+        expanded.append(current)
+        if current == goal:
+            return reconstruct_path(came_from, goal), expanded, g[goal]
+        for nb in neighbors_8(*current, grid):
+            mc = np.sqrt((nb[0] - current[0])**2 +
+                         (nb[1] - current[1])**2)
+            tentative_g = g[current] + mc
+            if tentative_g < g.get(nb, float('inf')):
+                g[nb] = tentative_g
+                came_from[nb] = current
+                eid += 1
+                heapq.heappush(heap, (tentative_g + heuristic(nb, goal),
+                                      eid, nb))
+    return None, expanded, float('inf')
+def reconstruct_path(came_from, current):
+    path = [current]
+    while current in came_from:
+        current = came_from[current]
+        path.append(current)
+    return path[::-1]
+
+def neighbors_8(r, c, grid):
+    """Return free 8-connected neighbors of cell (r, c)."""
+    rows, cols = grid.shape
+    for dr in [-1, 0, 1]:
+        for dc in [-1, 0, 1]:
+            if dr == 0 and dc == 0:
+                continue
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < rows and 0 <= nc < cols and grid[nr, nc] == 0:
+                yield (nr, nc)
+# END OF CODE USED FROM hw4_template
+def grid_to_world(cell, MAP_CENTER = MAP_CENTER, resolution = 0.05):
+    row, column = cell
+    x_c, y_c = MAP_CENTER
+    x = (column + 0.5)*resolution - x_c
+    y = (row + 0.5)*resolution - y_c
+    return [x, y]
+def object_to_grid(grid, position, obj_to_world, size, resolution, robot_radius):
+    radius_inflated = robot_radius*1.1
+    
+    wx = size[0]/2 + radius_inflated
+    wy = size[1]/2 + radius_inflated
+    
+    pos_world_x = position[0] + obj_to_world[0]
+    pos_world_y = position[1] + obj_to_world[1]
+    
+    min_x = pos_world_x - wx
+    max_x = pos_world_x + wx
+    
+    min_y = pos_world_y - wy
+    max_y = pos_world_y + wy
+    
+    min_x_grid = int(min_x/resolution)
+    max_x_grid = int(max_x/resolution)
+    
+    min_y_grid = int(min_y/resolution)
+    max_y_grid = int(max_y/resolution)
+    
+    min_x_grid = max(0, min_x_grid)
+    max_x_grid = min(grid.shape[0] - 1,max_x_grid)
+    
+    min_y_grid = max(0, min_y_grid)
+    max_y_grid = min(grid.shape[1] - 1, max_y_grid)
+    
+    grid[min_x_grid:max_x_grid+1, min_y_grid:max_y_grid+1] = 1
+# def plot_grid(grid, start, goal, title=""):
+#     rows, cols = grid.shape
+#     aspect = rows / cols
+#     fig_w = 7
+#     fig_h = max(3, fig_w * aspect + 1.5)
+
+#     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+#     ax.imshow(grid, cmap="Greys", origin="upper")
+
+#     ax.plot(start[1], start[0], "go", markersize=10, label="Start")
+#     ax.plot(goal[1], goal[0], "r*", markersize=14, label="Goal")
+
+#     ax.set_title(title if title else "Grid")
+#     ax.legend()
+#     plt.tight_layout()
+#     # plt.show() # usefull but will freeze python execution
+#     plt.savefig("grid.png")
+#     plt.close()
+def plot_grid(grid, start, goal, path=None, expanded=None, title=""):
+    rows, cols = grid.shape
+    aspect = rows / cols
+    fig_w = 7
+    fig_h = max(3, fig_w * aspect + 1.5)
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    ax.imshow(grid, cmap="Greys", origin="upper")
+
+    # expanded nodes
+    if expanded is not None and len(expanded) > 0:
+        er, ec = zip(*expanded)
+        ax.scatter(ec, er, c="dodgerblue", s=10, alpha=0.5, label="Expanded")
+
+    # A* path
+    if path is not None and len(path) > 0:
+        pr, pc = zip(*path)
+        ax.plot(pc, pr, c="red", linewidth=2, label="A* Path")
+
+    # start and goal
+    ax.plot(start[1], start[0], "go", markersize=10, label="Start")
+    ax.plot(goal[1], goal[0], "r*", markersize=14, label="Goal")
+
+    ax.set_title(title if title else "Grid")
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig("grid.png")
+    plt.close()
+
+    
+    
+
+def build_grid(env_map,start, goal, MAP_SIZE = MAP_SIZE, MAP_CENTER = MAP_CENTER, resolution = 0.05, robot_radius= ROBOT_RADIUS):
+    #resolution is m/index
+    MAP_X, MAP_Y = MAP_SIZE # [m]
+    MAP_CENTER_X, MAP_CENTER_Y = MAP_CENTER
+    
+    start_col = int(start[0] + MAP_CENTER_X/resolution)
+    start_row = int(start[1] + MAP_CENTER_Y/resolution)
+    start_pos = (start_row, start_col)
+    
+    goal_col = int((goal[0] + MAP_CENTER_X)/resolution)
+    goal_row = int((goal[1] + MAP_CENTER_X)/resolution)
+    goal_pos = (goal_row, goal_col)
+    
+    rows = int(MAP_X/resolution)
+    cols = int(MAP_Y/resolution)
+    # grid_center = int(MAP_CENTER/resolution)
+    grid = np.zeros((rows,cols), dtype=int)
+    for obs in env_map["obstacles"]:
+        # name = obs["def_name"]
+        pos = obs["position"]
+        size = obs["size"]
+        object_to_grid(grid,pos,MAP_CENTER,size,resolution,robot_radius)
+
+    return grid, start_pos, goal_pos      
+            
+            
+        #     size = 
+        #     position_world = 
+        # elif "wall_inner" in name:
+        
+        # elif "pick_table" in name:
+            
+        # elif "wall" in name:
+        #     if "wall_n" in name:
+                
+        #     elif "wall_e" in name:
+        #     elif "wall_s" in name:
+        #     elif "wall_w" in name:
+                
+    
+ 
+    # obstacles = env_map.get("obstacles", [])
+
+
+    
+    
 #TODO Implement
 def pick_object(pr2, obj_data):
     raise NotImplementedError("TODO 5: Implement pick_object(pr2, obj_data)")
@@ -450,10 +630,55 @@ def load_environment_map():
             # json.load() parses the file and returns a dict or list
             print("opened file")
             return json.load(file)
-
+def wrap_to_pi(angle):
+    return((angle + np.pi) % (2*np.pi) - np.pi)
 
 def navigate_to_goal(pr2, goal_x, goal_y, goal_yaw, env_map):
-    raise NotImplementedError("TODO 8: Implement navigate_to_goal()")
+    robot_x, robot_y, robot_yaw = pr2.get_pose()
+    start_xy = [robot_x, robot_y]
+    goal_xy = [goal_x, goal_y]
+    
+    grid, start_grid, goal_grid = build_grid(env_map, start_xy, goal_xy)
+    print("build grid working")
+    path, expanded, cost = astar(grid, start_grid, goal_grid, h_euclidean)
+    print("astar working\n astar path:")
+    # print(path)
+    if path is None:
+        print("No path was found")
+        return
+    waypoints = [grid_to_world(cell) for cell in path]
+    # print(f"waypoints:\n {waypoints[:,1]}, {waypoints[:,2]}")
+    for wp_x, wp_y in waypoints:
+        while pr2.step():
+            robot_x, robot_y, robot_yaw = pr2.get_pose()
+            
+            delta_x = wp_x - robot_x
+            delta_y = wp_y - robot_y
+            dist = np.sqrt(delta_x**2 +  delta_y**2)
+            dir = np.atan2(delta_y, delta_x)
+            # print(f"yaw: {round(robot_yaw,3)}, dir: {round(dir,3)}")
+            heading = wrap_to_pi(dir - robot_yaw)
+            print(heading)
+            if dist < 0.1:
+                pr2.stop()
+                break
+            elif abs(heading) > 0.15:
+                sign_heading = np.sign(heading)
+                vL = -sign_heading*0.3*MAX_WHEEL_SPEED
+                vR = sign_heading*0.3*MAX_WHEEL_SPEED
+                pr2.set_wheel_speeds(vL, vR)
+                
+            else:
+                vL = 0.3*MAX_WHEEL_SPEED
+                vR = 0.3*MAX_WHEEL_SPEED
+                pr2.set_wheel_speeds(vL, vR)
+        
+            
+            
+        
+        
+        
+        
 
 
 #Do not modify the main
@@ -461,6 +686,18 @@ def main():
     pr2 = PR2Controller()
     print("passed pr2")
     env = load_environment_map()
+    goal = [-5.5,-5.5]
+    goal_yaw = 0 
+    start = [pr2._x, pr2._y]
+
+    grid, start_grid, goal_grid = build_grid(env, start, goal)
+    plot_grid(grid, start_grid, goal_grid, path=None, expanded=None,title="Grid with A* Path")
+    path, expanded, cost = astar(grid, start_grid, goal_grid, h_euclidean)
+    print("astar working")
+    plot_grid(grid, start_grid, goal_grid, path=path, expanded=expanded,title="Grid with A* Path")
+    print("plot grid working")
+    navigate_to_goal(pr2, goal[0], goal[1], goal_yaw, env )
+    print("navigate to goal working")
     print(env)
 
     objects    = env.get("pick_objects",    {})
@@ -471,21 +708,21 @@ def main():
     if "OBJECT_1" in objects:
         g1 = nav_goals["OBJECT_1"]
         navigate_to_goal(pr2, g1["position"][0], g1["position"][1],
-                         g1["yaw_radians"], env)
+                         g1["dcm"], env)
         pick_object(pr2, objects["OBJECT_1"])
 
     # ── Pick OBJECT_2 ─────────────────────────────────────────────────────────
     if "OBJECT_2" in objects:
         g2 = nav_goals["OBJECT_2"]
         navigate_to_goal(pr2, g2["position"][0], g2["position"][1],
-                         g2["yaw_radians"], env)
+                         g2["dcm"], env)
         pick_object(pr2, objects["OBJECT_2"])
 
     # ── Place both objects ────────────────────────────────────────────────────
     if place_zone:
         pg = place_zone["nav_goal"]
         navigate_to_goal(pr2, pg["position"][0], pg["position"][1],
-                         pg["yaw_radians"], env)
+                         pg["dcm"], env)
         place_objects(pr2, place_zone)
 
     print(f"\n[Lab7] Done!  Total collisions: {pr2.get_collision_count()}")
