@@ -1,8 +1,6 @@
 import json, math, os
 import numpy as np
 from controller import Robot, Supervisor
-import heapq
-import matplotlib.pyplot as plt
 # ══════════════════════════════════════════════════════════════════════════════
 # PR2 ARM KINEMATICS  (do not modify)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -30,8 +28,7 @@ PR2_JOINT_LIMITS = [
 GRIPPER_OFFSET = 0.18    # metres from wrist to gripper fingertip along Z
 ARM_BASE_XY    = np.array([-0.05, -0.188])   # right shoulder in robot body frame (x,y)
 ARM_BASE_Z     = 1.07    # shoulder height (metres) when torso = 0.33 m
-MAP_SIZE = [14, 14]
-MAP_CENTER = [7, 7]
+
 # ══════════════════════════════════════════════════════════════════════════════
 # NAVIGATION CONSTANTS  (do not modify)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -44,6 +41,7 @@ K_ATT    = 1.5   # attractive gain
 K_REP    = 0.8   # repulsive gain
 D0       = 1.2   # influence radius (m) — obstacles beyond this are ignored
 STUCK_THRESHOLD = 0.03   # m — if robot moves less than this, it may be stuck
+NUM_ITEMS_PICKED = 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -118,17 +116,68 @@ def base_to_world(base_pos, robot_x, robot_y, robot_yaw):
 
 #TODO Implement
 def forward_kinematics(q):
-    raise NotImplementedError("TODO 1: Implement forward_kinematics(q)")
+    T = np.eye(4)
+    
+    for i in range(5):
+        a, d, alpha, theta_off = PR2_RIGHT_ARM_DH[i]
+        T = T @ _dh(a,d,alpha,q[i] + theta_off)
+        
+    position = T[0:3,3] + GRIPPER_OFFSET*T[0:3,2]
+
+    return position
+
 
 
 #TODO Implement
-def compute_jacobian(q):
-    raise NotImplementedError("TODO 2: Implement compute_jacobian(q)")
+def compute_jacobian(q,delta=1e-5):
+    J = np.ones((3,5))
+    
+    for i in range(5):
+        q_plus = np.array(q, dtype=float).copy()# store temp and shift
+        q_minus = np.array(q,dtype=float).copy()
+        
+        q_plus[i] += delta
+        q_minus[i] -= delta
+        add = forward_kinematics(q_plus)
+        sub = forward_kinematics(q_minus) # compute fk with - shift
+        
+        J[:,i] = ( add - sub ) / (2*delta) # eq
+        
+    return J
 
 
 #TODO Implement
-def gradient_descent_ik(target, q0=None, alpha=0.5, tol=0.008, max_iter=4000):
-    raise NotImplementedError("TODO 3: Implement gradient_descent_ik(...)")
+def gradient_descent_ik(pr2 , target, q0=None, alpha=0.05, tol=0.05, max_iter=4000):
+    q = np.array(q0, dtype=float).copy()
+    conv = False
+    errors = []
+    
+    # x , y , yaw = pr2.get_pose()
+    x , y , yaw = [3.05211,-2.41188,-0.0279936]
+    
+    print(f"robot pose : {x,y,yaw}")
+    target_base = world_to_base(target,x,y,yaw)
+    
+    for i in range(max_iter):
+        
+        pos_error = target_base - forward_kinematics(q)
+        
+        error_norm = np.linalg.norm(pos_error)
+        errors.append(error_norm)
+        
+        if error_norm < tol:
+            conv = True
+            break
+        
+        J_trans = np.transpose(compute_jacobian(q))
+        
+        q = q + alpha * J_trans @ pos_error
+        
+        for j in range(5):                               
+            lo, hi = PR2_JOINT_LIMITS[j]
+            q[j] = max(lo, min(hi, q[j]))
+    
+    return q , conv , errors
 
 
 #TODO Implement
@@ -136,183 +185,88 @@ def gradient_descent_ik(target, q0=None, alpha=0.5, tol=0.008, max_iter=4000):
 def compute_potential_field(robot_x, robot_y, goal_x, goal_y, lidar_ranges, lidar_fov):
     raise NotImplementedError("TODO 4: Implement compute_potential_field(...)")
 
-# ALL CODE HERE IS TAKEN FROM hw4_template
-def h_euclidean(a, b):
-    return np.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2)
 
-def astar(grid, start, goal, heuristic):
-    start = start
-    goal = goal
-    g = {start: 0.0}
-    came_from = {}
-    heap = [(heuristic(start, goal), 0, start)]
-    expanded = []
-    eid = 0
-    while heap:
-        _, _, current = heapq.heappop(heap)
-        if current in [e for e in expanded]:
-            continue
-        expanded.append(current)
-        if current == goal:
-            return reconstruct_path(came_from, goal), expanded, g[goal]
-        for nb in neighbors_8(*current, grid):
-            mc = np.sqrt((nb[0] - current[0])**2 +
-                         (nb[1] - current[1])**2)
-            tentative_g = g[current] + mc
-            if tentative_g < g.get(nb, float('inf')):
-                g[nb] = tentative_g
-                came_from[nb] = current
-                eid += 1
-                heapq.heappush(heap, (tentative_g + heuristic(nb, goal),
-                                      eid, nb))
-    return None, expanded, float('inf')
-def reconstruct_path(came_from, current):
-    path = [current]
-    while current in came_from:
-        current = came_from[current]
-        path.append(current)
-    return path[::-1]
-
-def neighbors_8(r, c, grid):
-    """Return free 8-connected neighbors of cell (r, c)."""
-    rows, cols = grid.shape
-    for dr in [-1, 0, 1]:
-        for dc in [-1, 0, 1]:
-            if dr == 0 and dc == 0:
-                continue
-            nr, nc = r + dr, c + dc
-            if 0 <= nr < rows and 0 <= nc < cols and grid[nr, nc] == 0:
-                yield (nr, nc)
-# END OF CODE USED FROM hw4_template
-def grid_to_world(cell, MAP_CENTER = MAP_CENTER, resolution = 0.005):
-    row, column = cell
-    x_c, y_c = MAP_CENTER
-    x = row*resolution - x_c
-    y = column*resolution - y_c
-    return [x, y]
-def object_to_grid(grid, position, obj_to_world, size, resolution, robot_radius):
-    radius_inflated = robot_radius*1.1
-    
-    wx = size[0]/2 + radius_inflated
-    wy = size[1]/2 + radius_inflated
-    
-    pos_world_x = position[0] + obj_to_world[0]
-    pos_world_y = position[1] + obj_to_world[1]
-    
-    min_x = pos_world_x - wx
-    max_x = pos_world_x + wx
-    
-    min_y = pos_world_y - wy
-    max_y = pos_world_y + wy
-    
-    min_x_grid = int(min_x/resolution)
-    max_x_grid = int(max_x/resolution)
-    
-    min_y_grid = int(min_y/resolution)
-    max_y_grid = int(max_y/resolution)
-    
-    min_x_grid = max(0, min_x_grid)
-    max_x_grid = min(grid.shape[0] - 1,max_x_grid)
-    
-    min_y_grid = max(0, min_y_grid)
-    max_y_grid = min(grid.shape[1] - 1, max_y_grid)
-    
-    grid[min_x_grid:max_x_grid+1, min_y_grid:max_y_grid+1] = 1
-def plot_grid(grid, start, goal, title=""):
-    rows, cols = grid.shape
-    aspect = rows / cols
-    fig_w = 7
-    fig_h = max(3, fig_w * aspect + 1.5)
-
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
-    ax.imshow(grid, cmap="Greys", origin="upper")
-
-    ax.plot(start[1], start[0], "go", markersize=10, label="Start")
-    ax.plot(goal[1], goal[0], "r*", markersize=14, label="Goal")
-
-    ax.set_title(title if title else "Grid")
-    ax.legend()
-    plt.tight_layout()
-    # plt.show() # usefull but will freeze python execution
-    plt.savefig("grid.png")
-    plt.close()
-# def plot_side_by_side(grid, start, goal, results, suptitle=""):
-#     """Side-by-side plots.
-#     results = [(alg_name, path, expanded, cost), ...]
-#     """
-#     n = len(results)
-#     rows, cols = grid.shape
-#     aspect = rows / cols
-#     fig_w = 7 * n
-#     fig_h = max(3, fig_w / n * aspect + 1.5)
-#     fig, axes = plt.subplots(1, n, figsize=(fig_w, fig_h))
-#     if n == 1:
-#         axes = [axes]
-#     for ax, (name, path, expanded, cost) in zip(axes, results):
-#         ax.imshow(grid, cmap="Greys", origin="upper")
-#         if expanded and len(expanded) > 0:
-#             er, ec = zip(*expanded)
-#             ax.scatter(ec, er, c="dodgerblue", s=20, alpha=0.6, zorder=2)
-#         if path:
-#             pr, pc = zip(*path)
-#             ax.plot(pc, pr, c="red", linewidth=2, alpha=0.8, zorder=3)
-#         ax.plot(start[1], start[0], "go", markersize=10)
-#         ax.plot(goal[1], goal[0], "r*", markersize=14)
-#         ax.set_title(f"{name}  (Cost={cost:.2f}, Expanded={len(expanded)})",
-#                      fontsize=10)
-#     if suptitle:
-#         fig.suptitle(suptitle, fontsize=13)
-#     plt.tight_layout(rect=[0, 0, 1, 0.95])
-
-    
-    
-
-def build_grid(env_map, goal, MAP_SIZE = MAP_SIZE, MAP_CENTER = MAP_CENTER, resolution = 0.005, robot_radius= ROBOT_RADIUS):
-    #resolution is m/index
-    MAP_X, MAP_Y = MAP_SIZE # [m]
-    MAP_CENTER_X, MAP_CENTER_Y = MAP_CENTER
-    start_pos_x = int(MAP_CENTER_X/resolution)
-    start_pos_y = int(MAP_CENTER_Y/resolution)
-    start_pos = (start_pos_x, start_pos_y)
-    goal_pos_x = int((goal[0] + MAP_CENTER_X)/resolution)
-    goal_pos_y = int((goal[1] + MAP_CENTER_X)/resolution)
-    goal_pos = (goal_pos_x, goal_pos_y)
-    rows = int(MAP_X/resolution)
-    cols = int(MAP_Y/resolution)
-    # grid_center = int(MAP_CENTER/resolution)
-    grid = np.zeros((rows,cols), dtype=int)
-    for obs in env_map["obstacles"]:
-        name = obs["def_name"]
-        pos = obs["position"]
-        size = obs["size"]
-        object_to_grid(grid,pos,MAP_CENTER,size,resolution,robot_radius)
-
-    return grid, start_pos, goal_pos      
-            
-            
-        #     size = 
-        #     position_world = 
-        # elif "wall_inner" in name:
-        
-        # elif "pick_table" in name:
-            
-        # elif "wall" in name:
-        #     if "wall_n" in name:
-                
-        #     elif "wall_e" in name:
-        #     elif "wall_s" in name:
-        #     elif "wall_w" in name:
-                
-    
- 
-    # obstacles = env_map.get("obstacles", [])
-
-
-    
-    
 #TODO Implement
-def pick_object(pr2, obj_data):
-    raise NotImplementedError("TODO 5: Implement pick_object(pr2, obj_data)")
+def pick_object(pr2, obj_data_dic):
+    global NUM_ITEMS_PICKED
+
+    obj_data = obj_data_dic["position"]
+    
+    print(f"object pose : {obj_data}")
+    
+
+    approach_pose = np.add(obj_data, [0.0,0.0,0.5]).tolist()
+    grasp_position = np.add(obj_data, [0.0,0.0,0.5]).tolist()
+    
+    print(f"approach_pose : {approach_pose}")
+    print(f"grasp_position : {grasp_position}")
+    
+
+    # use right arm    
+    if NUM_ITEMS_PICKED == 0:
+        pr2.set_torso(0.33)  
+        pr2.open_gripper(True) # True
+        
+        print("torso and gripper open")
+        
+        # MOVE TO APPROACH POSE
+        HOME = q = pr2.get_right_arm_q()
+        
+        print(f"current pos : {q}")
+        
+        q , conv , erros = gradient_descent_ik(pr2 , approach_pose, q)
+        
+        if conv:
+            pr2.set_right_arm(q)
+            print("moved to above block")
+        else:
+            raise NotImplementedError("ERROR: failed")
+            
+        #MOVE TO GRASP POSITION
+        # q , conv , erros = gradient_descent_ik(pr2 , grasp_position, q)
+        
+        # if conv:
+            # pr2.set_right_arm(q)
+            # print("moved to grasp position")
+        # else:
+            # raise NotImplementedError("ERROR: failed")
+            
+        #GRASP 
+        # pr2.close_gripper(True) # True
+        
+        #LIFT OBJECT BACK TO APPROACH 
+        # q , conv , erros = gradient_descent_ik(pr2, approach_pose, q)
+        
+        # if conv:
+            # pr2.set_right_arm(q)
+            # print("moved to above block with object")
+        # else:
+            # raise NotImplementedError("ERROR: failed")
+            
+        #MOVE TO SAFE POSITION
+        # q , conv , erros = gradient_descent_ik(pr2, HOME, q)
+        
+        # if conv:
+            # pr2.set_right_arm(q)
+            # print("moved to carrying position")
+        # else:
+            # raise NotImplementedError("ERROR: failed")
+        
+        NUM_ITEMS_PICKED += 1
+        print("Picked up object")
+    
+    # use left arm
+    elif NUM_ITEMS_PICKED == 1:
+        pr2.set_torso(obj_data[2])
+        pr2.open_gripper(False) # Left 
+        
+        pr2.set_left_arm(obj_data)
+    
+        NUM_ITEMS_PICKED += 1
+    else:
+        raise NotImplementedError("ERROR: TOO MANY ITEMS")
+    
+   
 
 
 #TODO Implement
@@ -621,93 +575,49 @@ class PR2Controller:
 
 
 def load_environment_map():
-    print("running func")
     with open('environment_map.json', 'r') as file:
             # json.load() parses the file and returns a dict or list
-            print("opened file")
             return json.load(file)
-def wrap_to_pi(angle):
-    return((angle + np.pi) % (2*np.pi) - np.pi)
+
 
 def navigate_to_goal(pr2, goal_x, goal_y, goal_yaw, env_map):
-    goal_xy = [goal_x, goal_y]
-    grid, start_grid, goal_grid = build_grid(env_map, goal_xy)
-    print(grid)
-    path, expanded, cost = astar(grid, start_grid, goal_grid, h_euclidean)
-    if path is None:
-        print("No path was found")
-        return
-    waypoints = [grid_to_world(cell) for cell in path]
-    for wp_x, wp_y in waypoints:
-        while pr2.step():
-            robot_x, robot_y, robot_yaw = pr2.get_pose()
-
-            delta_x = wp_x - robot_x
-            delta_y = wp_y - robot_y
-            dist = np.sqrt(delta_x**2 +  delta_y**2)
-            dir = np.atan2(delta_y, delta_x)
-            heading = wrap_to_pi(dir - robot_yaw)
-            if dist < 0.05:
-                pr2.stop()
-                break
-            elif abs(heading) > 0.1:
-                sign_heading = heading/abs(heading)
-                vL = -sign_heading*0.5*MAX_WHEEL_SPEED
-                vR = sign_heading*0.5*MAX_WHEEL_SPEED
-                pr2.set_wheel_speeds(vL, vR)
-                
-            else:
-                vL = 0.5*MAX_WHEEL_SPEED
-                vR = 0.5*MAX_WHEEL_SPEED
-                pr2.set_wheel_speeds(vL, vR)
-        
-            
-            
-        
-        
-        
-        
+    raise NotImplementedError("TODO 8: Implement navigate_to_goal()")
 
 
 #Do not modify the main
 def main():
     pr2 = PR2Controller()
-    print("passed pr2")
     env = load_environment_map()
-    goal = [-3,-2.5]
-    goal_yaw = 3.14/2
-
-    grid,start,goal_grid, = build_grid(env, goal)
-    print("build_grid working")
-    plot_grid(grid, start, goal_grid)
-    print("plot grid working")
-    navigate_to_goal(pr2, goal[0], goal[1], goal_yaw, env )
-    print("navigate to goal working")
+    
     print(env)
 
     objects    = env.get("pick_objects",    {})
     nav_goals  = env.get("navigation_goals", {})
     place_zone = env.get("place_zone",      {})
+    
+    print(f"printing objs: {objects}")
 
     # ── Pick OBJECT_1 ─────────────────────────────────────────────────────────
-    if "OBJECT_1" in objects:
-        g1 = nav_goals["OBJECT_1"]
-        navigate_to_goal(pr2, g1["position"][0], g1["position"][1],
-                         g1["dcm"], env)
-        pick_object(pr2, objects["OBJECT_1"])
+    if "OBJECT_2" in objects:
+        # g1 = nav_goals["OBJECT_1"]
+        # navigate_to_goal(pr2, g1["position"][0], g1["position"][1],
+                         # g1["yaw_radians"], env)
+        print("Picking up object")
+        pick_object(pr2, objects["OBJECT_2"])
+        print("done")
 
     # ── Pick OBJECT_2 ─────────────────────────────────────────────────────────
     if "OBJECT_2" in objects:
         g2 = nav_goals["OBJECT_2"]
         navigate_to_goal(pr2, g2["position"][0], g2["position"][1],
-                         g2["dcm"], env)
+                         g2["yaw_radians"], env)
         pick_object(pr2, objects["OBJECT_2"])
 
     # ── Place both objects ────────────────────────────────────────────────────
     if place_zone:
         pg = place_zone["nav_goal"]
         navigate_to_goal(pr2, pg["position"][0], pg["position"][1],
-                         pg["dcm"], env)
+                         pg["yaw_radians"], env)
         place_objects(pr2, place_zone)
 
     print(f"\n[Lab7] Done!  Total collisions: {pr2.get_collision_count()}")
