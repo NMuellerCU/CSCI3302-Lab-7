@@ -376,7 +376,6 @@ class PR2Controller:
     # ── Construction ──────────────────────────────────────────────────────────
 
     def __init__(self):
-        print("starting pr2 init")
         self.robot = Robot()
         self.ts    = int(self.robot.getBasicTimeStep())
 
@@ -385,21 +384,16 @@ class PR2Controller:
         self._y   = 1.0
         self._yaw = -math.pi / 2   # PR2 starts facing south (-Y)
         self._collision_count = 0
-        print("devices set up")
+
         self._setup_devices()
-        print("devices enabled")
         self._enable_devices()
-        print("before right arm")
+
+        # Initial safe pose
         self.set_right_arm([0., 1.35, 0., -2.2, 0.])
-        print("before left arm")
-        self.set_left_arm([0., 1.35, 0., -2.2, 0.])
-        print("before right gripper")
+        self.set_left_arm( [0., 1.35, 0., -2.2, 0.])
         self.open_gripper(right=True)
-        print("before left gripper")
         self.open_gripper(right=False)
-        print("before torso")
-        self.set_torso(0.26)
-        print("finished PR2 init")
+        self.set_torso(0.33)
 
     # ── Device setup (internal) ───────────────────────────────────────────────
 
@@ -743,92 +737,38 @@ def navigate_to_goal(pr2, goal_x, goal_y, goal_yaw, env_map):
 
 #Do not modify the main
 def main():
-    print("hit main")
     pr2 = PR2Controller()
-    print("pr2")
     env = load_environment_map()
-    print("loaded environment map")
+
     objects    = env.get("pick_objects",    {})
     nav_goals  = env.get("navigation_goals", {})
     place_zone = env.get("place_zone",      {})
 
-    print('before object_1 if')
     # ── Pick OBJECT_1 ─────────────────────────────────────────────────────────
     if "OBJECT_1" in objects:
-        print("enters Object_1 if")
         g1 = nav_goals["OBJECT_1"]
-        print(g1)
         navigate_to_goal(pr2, g1["position"][0], g1["position"][1],
                          g1["yaw_radians"], env)
-        # pick_object(pr2, objects["OBJECT_1"])
+        pick_object(pr2, objects["OBJECT_1"])
 
     # ── Pick OBJECT_2 ─────────────────────────────────────────────────────────
     if "OBJECT_2" in objects:
         g2 = nav_goals["OBJECT_2"]
         navigate_to_goal(pr2, g2["position"][0], g2["position"][1],
                          g2["yaw_radians"], env)
-        # pick_object(pr2, objects["OBJECT_2"])
+        pick_object(pr2, objects["OBJECT_2"])
 
     # ── Place both objects ────────────────────────────────────────────────────
     if place_zone:
         pg = place_zone["nav_goal"]
         navigate_to_goal(pr2, pg["position"][0], pg["position"][1],
                          pg["yaw_radians"], env)
-        # place_objects(pr2, place_zone)
+        place_objects(pr2, place_zone)
 
     print(f"\n[Lab7] Done!  Total collisions: {pr2.get_collision_count()}")
     print(f"[Lab7] Collision penalty: -{pr2.get_collision_count() * 5} pts")
     while pr2.step():
         pass
-# Do not modify the main
-# def main():
-#     pr2 = PR2Controller()
-#     print("passed pr2")
-#     env = load_environment_map()
-#     goal = [-3,-2.7]
-#     goal_yaw = -1.57079
-#     start_x, start_y, start_yaw = pr2.get_pose()
-#     start = [start_x, start_y]
-
-#     grid, start_grid, goal_grid = build_grid(env, start, goal)
-#     plot_grid(grid, start_grid, goal_grid, path=None, expanded=None,title="Grid with A* Path")
-#     path, expanded, cost = astar(grid, start_grid, goal_grid, h_euclidean)
-#     print("astar working")
-#     plot_grid(grid, start_grid, goal_grid, path=path, expanded=expanded,title="Grid with A* Path")
-#     print("plot grid working")
-#     navigate_to_goal(pr2, goal[0], goal[1], goal_yaw, env )
-#     print("navigate to goal working")
-#     print(env)
-
-#     objects    = env.get("pick_objects",    {})
-#     nav_goals  = env.get("navigation_goals", {})
-#     place_zone = env.get("place_zone",      {})
-
-#     # ── Pick OBJECT_1 ─────────────────────────────────────────────────────────
-#     if "OBJECT_1" in objects:
-#         g1 = nav_goals["OBJECT_1"]
-#         navigate_to_goal(pr2, g1["position"][0], g1["position"][1],
-#                          g1["yaw_radians"], env)
-#         pick_object(pr2, objects["OBJECT_1"])
-
-#     # ── Pick OBJECT_2 ─────────────────────────────────────────────────────────
-#     if "OBJECT_2" in objects:
-#         g2 = nav_goals["OBJECT_2"]
-#         navigate_to_goal(pr2, g2["position"][0], g2["position"][1],
-#                          g2["yaw_radians"], env)
-#         pick_object(pr2, objects["OBJECT_2"])
-
-#     # ── Place both objects ────────────────────────────────────────────────────
-#     if place_zone:
-#         pg = place_zone["nav_goal"]
-#         navigate_to_goal(pr2, pg["position"][0], pg["position"][1],
-#                          pg["yaw_radians"], env)
-#         place_objects(pr2, place_zone)
-
-#     print(f"\n[Lab7] Done!  Total collisions: {pr2.get_collision_count()}")
-#     print(f"[Lab7] Collision penalty: -{pr2.get_collision_count() * 5} pts")
-#     while pr2.step():
-#         pass
 
 
 if __name__ == "__main__":
