@@ -485,7 +485,7 @@ def pick_object(pr2, obj_data_dic):
 
     obj_data = obj_data_dic["position"]
     obj_data = np.add(obj_data, [0.0, -0.05, 0.0]).tolist()
-    obj2_data = np.add(obj_data, [-0.55, 0.3, 0.3]).tolist()
+    approach2_pose = np.add(obj_data, [0, 0.25, 0.3]).tolist()
     
     print(f"object pose : {obj_data}")
     
@@ -585,7 +585,7 @@ def pick_object(pr2, obj_data_dic):
         
         print(f"current pos : {q}")
         
-        q , conv , erros = gradient_descent_ik(pr2 ,obj2_data, q)
+        q , conv , erros = gradient_descent_ik(pr2 ,approach2_pose, q)
         q = np.add(q, [0, 0, 0, 0, 0.5]).tolist()
         
         if conv:
@@ -600,6 +600,7 @@ def pick_object(pr2, obj_data_dic):
             pr2.close_gripper(False)
             q = pr2.get_left_arm_q()
             q = np.add(q, [0, 0, 0, -0.6, 0]).tolist()
+            pr2.set_left_arm(q)
         else:
             raise NotImplementedError("ERROR: failed")
         NUM_ITEMS_PICKED += 1
@@ -614,6 +615,29 @@ def pick_object(pr2, obj_data_dic):
 #TODO Implement
 
 def place_objects(pr2, place_zone):
+    place_zone = place_zone["nav_goal"]["position"]
+    place_zone = np.add(place_zone, [0, 0.4, 0.8]).tolist()
+    
+    print(place_zone)
+    q_R = pr2.get_right_arm_q()
+    q_L = pr2.get_left_arm_q()
+    
+    q_R, conv, error = gradient_descent_ik(pr2, place_zone, q_R)
+    
+    if conv:
+        pr2.set_right_arm(q_R)
+        pr2.open_gripper(True) 
+    else: 
+        raise NotImplementedError("CAN'T CONVERGE")
+    q_L, conv, error = gradient_descent_ik(pr2, place_zone, q_L)
+    if conv:
+        pr2.set_left_arm(q_L)
+        pr2.open_gripper(False) 
+    else: 
+        raise NotImplementedError("CAN'T CONVERGE")
+        
+    return
+    
     raise NotImplementedError("TODO 6: Implement place_objects(pr2, place_zone)")
 
 
@@ -1092,6 +1116,7 @@ def main():
     objects    = env.get("pick_objects",    {})
     nav_goals  = env.get("navigation_goals", {})
     place_zone = env.get("place_zone",      {})
+    print(place_zone['nav_goal']['position'])
 
     # ── Pick OBJECT_1 ─────────────────────────────────────────────────────────
     if "OBJECT_1" in objects:
@@ -1138,4 +1163,4 @@ def main2():
     
 
 if __name__ == "__main__":
-    main2()
+    main()
