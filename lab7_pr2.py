@@ -1,6 +1,8 @@
 import json, math, os
 import numpy as np
 from controller import Robot, Supervisor
+import heapq
+import matplotlib.pyplot as plt
 # ══════════════════════════════════════════════════════════════════════════════
 # PR2 ARM KINEMATICS  (do not modify)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -28,7 +30,8 @@ PR2_JOINT_LIMITS = [
 GRIPPER_OFFSET = 0.18    # metres from wrist to gripper fingertip along Z
 ARM_BASE_XY    = np.array([-0.05, -0.188])   # right shoulder in robot body frame (x,y)
 ARM_BASE_Z     = 1.07    # shoulder height (metres) when torso = 0.33 m
-
+MAP_SIZE = [14, 14]
+MAP_CENTER = [7, 7]
 # ══════════════════════════════════════════════════════════════════════════════
 # NAVIGATION CONSTANTS  (do not modify)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -36,12 +39,13 @@ ARM_BASE_Z     = 1.07    # shoulder height (metres) when torso = 0.33 m
 MAX_WHEEL_SPEED  = 6.0   # rad/s  — maximum wheel angular velocity
 ROBOT_RADIUS     = 0.335 # m      — PR2 base half-width (for collision check)
 
+
+NUM_ITEMS_PICKED = 0
 # Potential field tuning (you may adjust these in your TODO section)
 K_ATT    = 1.5   # attractive gain
 K_REP    = 0.8   # repulsive gain
 D0       = 1.2   # influence radius (m) — obstacles beyond this are ignored
 STUCK_THRESHOLD = 0.03   # m — if robot moves less than this, it may be stuck
-NUM_ITEMS_PICKED = 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -127,9 +131,8 @@ def forward_kinematics(q):
     return position
 
 
-
 #TODO Implement
-def compute_jacobian(q,delta=1e-5):
+def compute_jacobian(q, delta = 1e-5):
     J = np.ones((3,5))
     
     for i in range(5):
@@ -145,15 +148,18 @@ def compute_jacobian(q,delta=1e-5):
         
     return J
 
-
 #TODO Implement
-def gradient_descent_ik(pr2 , target, q0=None, alpha=0.05, tol=0.05, max_iter=4000):
+def gradient_descent_ik(pr2, target, q0=None, alpha=0.05, tol=0.08, max_iter=4000):
     q = np.array(q0, dtype=float).copy()
     conv = False
     errors = []
     
-    # x , y , yaw = pr2.get_pose()
-    x , y , yaw = [3.05211,-2.41188,-0.0279936]
+    x , y , yaw = pr2.get_pose()
+    # x , y , yaw = [3.05211,-2.41188,-0.0279936]
+    target_base = world_to_base(target, x, y, yaw)
+    
+    print(f"target in base frame: {target_base}")
+    print(f"distance from shoulder: {np.linalg.norm(target_base):.3f}m (max ~0.9m)")
     
     print(f"robot pose : {x,y,yaw}")
     target_base = world_to_base(target,x,y,yaw)
@@ -176,6 +182,8 @@ def gradient_descent_ik(pr2 , target, q0=None, alpha=0.05, tol=0.05, max_iter=40
         for j in range(5):                               
             lo, hi = PR2_JOINT_LIMITS[j]
             q[j] = max(lo, min(hi, q[j]))
+            
+    print(f"[IK] conv={conv} iters={len(errors)} final_error={errors[-1]:.4f}")
     
     return q , conv , errors
 
@@ -183,23 +191,309 @@ def gradient_descent_ik(pr2 , target, q0=None, alpha=0.05, tol=0.05, max_iter=40
 #TODO Implement
 
 def compute_potential_field(robot_x, robot_y, goal_x, goal_y, lidar_ranges, lidar_fov):
+    dx_world = goal_x - robot_x
+    dy_world = goal_y - robot_y
+    dist_to_goal = math.sqrt(dx_world**2 + dy_world**2)
+
+    if dist_to_goal < 0.05:
+        return 0.0, 0.0
+
+    # Convert to local frame
+    cos_y = math.cos(-robot_yaw)
+    sin_y = math.sin(-robot_yaw)
+    dx_local = cos_y * dx_world - sin_y * dy_world
+    dy_local = sin_y * dx_world + cos_y * dy_world
+
+    #  attractive potential
+    att_scale = K_ATT * min(dist_to_goal, D0) / dist_to_goal
+    F_att_x = att_scale * dx_local
+    F_att_y = att_scale * dy_local
+
+    #Repulsive forces from lidar 
+    F_rep_x = 0.0
+    F_rep_y = 0.0
+
+    n_rays = len(lidar_ranges)
+    if n_rays > 1:
+        angle_step  = lidar_fov / (n_rays - 1)
+        angle_start = -lidar_fov / 2.0
+
+        for i, r in enumerate(lidar_ranges):
+            if math.isnan(r) or math.isinf(r) or r < 0.05:
+                continue
+            if r >= D0:
+                continue                      
+            ray_angle = angle_start + i * angle_step
+
+            # Obstacle direction unit vector in robot local frame
+            ox = math.cos(ray_angle)
+            oy = math.sin(ray_angle)
+
+            # Gradient of repulsive potential
+            rep_mag = K_REP * (1.0/r - 1.0/D0) / (r**2)
+            F_rep_x -= rep_mag * ox          # push away
+            F_rep_y -= rep_mag * oy
+
+    # Total force 
+    Fx = F_att_x + F_rep_x
+    Fy = F_att_y + F_rep_y
+
+    force_mag = math.sqrt(Fx**2 + Fy**2)
+    if force_mag < 1e-6:
+        # Zero-magnitude result escape local minimum
+        return -MAX_WHEEL_SPEED * 0.3, MAX_WHEEL_SPEED * 0.3
+
+    # desired_heading angle of force vector
+    desired_heading = math.atan2(Fy, Fx)
+
+    # Forward speed proportional to how much force aligns with forward (+X)
+    forward_component = Fx / force_mag          
+    base_speed = MAX_WHEEL_SPEED * max(0.0, forward_component)
+
+
+    K_turn = 3.0
+    turn   = K_turn * desired_heading         
+
+    v_left  = base_speed - turn
+    v_right = base_speed + turn
+
+    max_v = max(abs(v_left), abs(v_right), 1e-6)
+    if max_v > MAX_WHEEL_SPEED:
+        v_left  *= MAX_WHEEL_SPEED / max_v
+        v_right *= MAX_WHEEL_SPEED / max_v
+
+    return v_left, v_right
     raise NotImplementedError("TODO 4: Implement compute_potential_field(...)")
 
+# ALL CODE HERE IS TAKEN FROM hw4_template
+def h_euclidean(a, b):
+    return np.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2)
 
+def astar(grid, start, goal, heuristic):
+    start = start
+    goal = goal
+    g = {start: 0.0}
+    came_from = {}
+    heap = [(heuristic(start, goal), 0, start)]
+    expanded = []
+    eid = 0
+    while heap:
+        _, _, current = heapq.heappop(heap)
+        if current in [e for e in expanded]:
+            continue
+        expanded.append(current)
+        if current == goal:
+            return reconstruct_path(came_from, goal), expanded, g[goal]
+        for nb in neighbors_8(*current, grid):
+            mc = np.sqrt((nb[0] - current[0])**2 +
+                         (nb[1] - current[1])**2)
+            tentative_g = g[current] + mc
+            if tentative_g < g.get(nb, float('inf')):
+                g[nb] = tentative_g
+                came_from[nb] = current
+                eid += 1
+                heapq.heappush(heap, (tentative_g + heuristic(nb, goal),
+                                      eid, nb))
+    return None, expanded, float('inf')
+def reconstruct_path(came_from, current):
+    path = [current]
+    while current in came_from:
+        current = came_from[current]
+        path.append(current)
+    return path[::-1]
+
+def neighbors_8(r, c, grid):
+    """Return free 8-connected neighbors of cell (r, c)."""
+    rows, cols = grid.shape
+    for dr in [-1, 0, 1]:
+        for dc in [-1, 0, 1]:
+            if dr == 0 and dc == 0:
+                continue
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < rows and 0 <= nc < cols and grid[nr, nc] == 0:
+                yield (nr, nc)
+# END OF CODE USED FROM hw4_template
+def grid_to_world(cell, MAP_CENTER = MAP_CENTER, resolution = 0.05):
+    row, column = cell
+    x_c, y_c = MAP_CENTER
+    x = (column + 0.5)*resolution - x_c
+    y = (row + 0.5)*resolution - y_c
+    return [x, y]
+def object_to_grid(grid, position, obj_to_world, size, resolution, robot_radius):
+    radius_inflated = robot_radius*1.05
+    
+    wx = size[0]/2 + radius_inflated
+    wy = size[1]/2 + radius_inflated
+    
+    pos_world_x = position[0] + obj_to_world[0]
+    pos_world_y = position[1] + obj_to_world[1]
+    
+    min_x = pos_world_x - wx
+    max_x = pos_world_x + wx
+    
+    min_y = pos_world_y - wy
+    max_y = pos_world_y + wy
+    
+    min_x_grid = int(min_x/resolution)
+    max_x_grid = int(max_x/resolution)
+    
+    min_y_grid = int(min_y/resolution)
+    max_y_grid = int(max_y/resolution)
+    
+    min_x_grid = max(0, min_x_grid)
+    max_x_grid = min(grid.shape[0] - 1,max_x_grid)
+    
+    min_y_grid = max(0, min_y_grid)
+    max_y_grid = min(grid.shape[1] - 1, max_y_grid)
+    
+    grid[min_y_grid:max_y_grid+1, min_x_grid:max_x_grid+1] = 1
+
+# def plot_grid(grid, start, goal, path=None, expanded=None, title=""):
+#     rows, cols = grid.shape
+#     aspect = rows / cols
+#     fig_w = 7
+#     fig_h = max(3, fig_w * aspect + 1.5)
+
+#     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+#     ax.imshow(grid, cmap="Greys", origin="upper")
+
+#     # expanded nodes
+#     if expanded is not None and len(expanded) > 0:
+#         er, ec = zip(*expanded)
+#         ax.scatter(ec, er, c="dodgerblue", s=10, alpha=0.5, label="Expanded")
+
+#     # A* path
+#     if path is not None and len(path) > 0:
+#         pr, pc = zip(*path)
+#         ax.plot(pc, pr, c="red", linewidth=2, label="A* Path")
+
+#     # start and goal
+#     ax.plot(start[1], start[0], "go", markersize=10, label="Start")
+#     ax.plot(goal[1], goal[0], "r*", markersize=14, label="Goal")
+
+#     ax.set_title(title if title else "Grid")
+#     ax.legend()
+#     plt.tight_layout()
+#     plt.savefig("grid.png")
+#     plt.close()
+
+def plot_grid(grid, start, goal, path=None, expanded=None, title=""):
+    import numpy as np
+
+    # transform grid for display:
+    # 1) flip horizontally
+    # 2) rotate 90 deg left
+    disp_grid = np.rot90(np.fliplr(grid), 1)
+
+    rows, cols = disp_grid.shape
+    aspect = rows / cols
+    fig_w = 7
+    fig_h = max(3, fig_w * aspect + 1.5)
+
+    # original grid shape
+    orig_rows, orig_cols = grid.shape
+
+    def transform_point(r, c):
+        # step 1: horizontal flip
+        c1 = orig_cols - 1 - c
+        r1 = r
+
+        # step 2: rotate 90 deg left
+        r2 = orig_cols - 1 - c1
+        c2 = r1
+
+        return r2, c2
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    ax.imshow(disp_grid, cmap="Greys", origin="upper")
+
+    # expanded nodes
+    if expanded is not None and len(expanded) > 0:
+        transformed_expanded = [transform_point(r, c) for r, c in expanded]
+        er, ec = zip(*transformed_expanded)
+        ax.scatter(ec, er, c="dodgerblue", s=10, alpha=0.5, label="Expanded")
+
+    # A* path
+    if path is not None and len(path) > 0:
+        transformed_path = [transform_point(r, c) for r, c in path]
+        pr, pc = zip(*transformed_path)
+        ax.plot(pc, pr, c="red", linewidth=2, label="A* Path")
+
+    # start and goal
+    sr, sc = transform_point(start[0], start[1])
+    gr, gc = transform_point(goal[0], goal[1])
+
+    ax.plot(sc, sr, "go", markersize=10, label="Start")
+    ax.plot(gc, gr, "r*", markersize=14, label="Goal")
+
+    ax.set_title(title if title else "Grid")
+    ax.legend()
+    plt.tight_layout()
+    plt.savefig("grid.png")
+    plt.close()
+    
+
+def build_grid(env_map,start, goal, MAP_SIZE = MAP_SIZE, MAP_CENTER = MAP_CENTER, resolution = 0.05, robot_radius= ROBOT_RADIUS):
+    #resolution is m/index
+    MAP_X, MAP_Y = MAP_SIZE # [m]
+    MAP_CENTER_X, MAP_CENTER_Y = MAP_CENTER
+    
+    start_col = int((start[0] + MAP_CENTER_X)/resolution)
+    start_row = int((start[1] + MAP_CENTER_Y)/resolution)
+    start_pos = (start_row, start_col)
+    
+    goal_col = int((goal[0] + MAP_CENTER_X)/resolution)
+    goal_row = int((goal[1] + MAP_CENTER_Y)/resolution)
+    goal_pos = (goal_row, goal_col)
+    
+    rows = int(MAP_X/resolution)
+    cols = int(MAP_Y/resolution)
+    # grid_center = int(MAP_CENTER/resolution)
+    grid = np.zeros((rows,cols), dtype=int)
+    for obs in env_map["obstacles"]:
+        # name = obs["def_name"]
+        pos = obs["position"]
+        size = obs["size"]
+        object_to_grid(grid,pos,MAP_CENTER,size,resolution,robot_radius)
+
+    return grid, start_pos, goal_pos      
+            
+            
+        #     size = 
+        #     position_world = 
+        # elif "wall_inner" in name:
+        
+        # elif "pick_table" in name:
+            
+        # elif "wall" in name:
+        #     if "wall_n" in name:
+                
+        #     elif "wall_e" in name:
+        #     elif "wall_s" in name:
+        #     elif "wall_w" in name:
+                
+    
+ 
+    # obstacles = env_map.get("obstacles", [])
+
+
+    
+    
 #TODO Implement
 def pick_object(pr2, obj_data_dic):
     global NUM_ITEMS_PICKED
 
     obj_data = obj_data_dic["position"]
+    obj_data = np.add(obj_data, [0.0, -0.05, 0.0]).tolist()
+    obj2_data = np.add(obj_data, [-0.55, 0.3, 0.3]).tolist()
     
     print(f"object pose : {obj_data}")
     
 
-    approach_pose = np.add(obj_data, [0.0,0.0,0.5]).tolist()
-    grasp_position = np.add(obj_data, [0.0,0.0,0.5]).tolist()
+    approach_pose = np.add(obj_data, [0.15, 0.0, 0.23]).tolist()
     
-    print(f"approach_pose : {approach_pose}")
-    print(f"grasp_position : {grasp_position}")
+    # print(f"approach_pose : {approach_pose}")
+    # print(f"grasp_position : {grasp_position}")
     
 
     # use right arm    
@@ -214,25 +508,52 @@ def pick_object(pr2, obj_data_dic):
         
         print(f"current pos : {q}")
         
-        q , conv , erros = gradient_descent_ik(pr2 , approach_pose, q)
+        q , conv , erros = gradient_descent_ik(pr2 ,approach_pose, q)
+        q = np.add(q, [0, 0, 0, 0, -0.5]).tolist()
         
         if conv:
             pr2.set_right_arm(q)
+            for _ in range(50):
+                pr2.step()
             print("moved to above block")
         else:
             raise NotImplementedError("ERROR: failed")
             
+            
+        
+        q = pr2.get_right_arm_q() 
+        q = np.add(q, [0, 0, 0, 0.6, 0]).tolist()
+        pr2.set_right_arm(q)
+        pr2.close_gripper(True) 
+        for i in range(10):
+                pr2.step()         
         #MOVE TO GRASP POSITION
         # q , conv , erros = gradient_descent_ik(pr2 , grasp_position, q)
         
         # if conv:
             # pr2.set_right_arm(q)
+            # for _ in range(50):
+                # pr2.step()
             # print("moved to grasp position")
         # else:
             # raise NotImplementedError("ERROR: failed")
             
-        #GRASP 
-        # pr2.close_gripper(True) # True
+        # #GRASP 
+
+        print("Gripper closed")# True
+        
+        
+        q = np.add(q, [0, 0, 0, -0.7, 0]).tolist()
+        q = np.add(q, [0, 0, 0, 0, -0.5]).tolist()
+        pr2.set_right_arm(q)       
+        # q , conv , erros = gradient_descent_ik(pr2 ,HOME, q)
+        # if conv:
+           # pr2.set_right_arm(q)
+           # print("BACK TO HOME")
+        
+        
+        
+        
         
         #LIFT OBJECT BACK TO APPROACH 
         # q , conv , erros = gradient_descent_ik(pr2, approach_pose, q)
@@ -257,17 +578,38 @@ def pick_object(pr2, obj_data_dic):
     
     # use left arm
     elif NUM_ITEMS_PICKED == 1:
-        pr2.set_torso(obj_data[2])
         pr2.open_gripper(False) # Left 
+        print("torso and gripper open")
         
-        pr2.set_left_arm(obj_data)
-    
+        HOME = q = pr2.get_left_arm_q()
+        
+        print(f"current pos : {q}")
+        
+        q , conv , erros = gradient_descent_ik(pr2 ,obj2_data, q)
+        q = np.add(q, [0, 0, 0, 0, 0.5]).tolist()
+        
+        if conv:
+            pr2.set_left_arm(q)
+            for _ in range(50):
+                pr2.step()
+            print("moved to above can")
+            q = pr2.get_left_arm_q() 
+            q = np.add(q, [0, 0, 0, 0.61, 0]).tolist()
+            pr2.set_left_arm(q)
+            print("Dropped to can")
+            pr2.close_gripper(False)
+            q = pr2.get_left_arm_q()
+            q = np.add(q, [0, 0, 0, -0.6, 0]).tolist()
+        else:
+            raise NotImplementedError("ERROR: failed")
         NUM_ITEMS_PICKED += 1
     else:
         raise NotImplementedError("ERROR: TOO MANY ITEMS")
     
    
 
+
+#TODO Implement
 
 #TODO Implement
 
@@ -473,19 +815,24 @@ class PR2Controller:
     # ── Torso ─────────────────────────────────────────────────────────────────
 
     def set_torso(self, height, wait=True):
-        """
-        Set torso height.
+        print("set_torso called")
+        print("torso motor:", self._tor)
+        print("torso sensor:", self._tors)
 
-        Parameters
-        ----------
-        height : float in [0.0, 0.33] metres
-        wait   : if True, blocks until torso reaches target
-        """
-        if self._tor: self._tor.setPosition(max(0., min(0.33, height)))
+        if self._tor:
+            self._tor.setPosition(max(0., min(0.33, height)))
+
         if wait and self._tors:
-            for _ in range(600):
-                if not self.step(): return
-                if abs(self._tors.getValue() - height) < 0.01: break
+            for i in range(600):
+                if not self.step():
+                    print("step returned false during torso")
+                    return
+                val = self._tors.getValue()
+                if i % 20 == 0:
+                    print("torso sensor value:", val, "target:", height)
+                if abs(val - height) < 0.01:
+                    print("torso reached target")
+                    break
 
     # ── Arm control ───────────────────────────────────────────────────────────
 
@@ -504,6 +851,10 @@ class PR2Controller:
     def get_right_arm_q(self):
         """Return current right arm joint angles as np.ndarray shape (5,)."""
         return np.array([s.getValue() if s else 0. for s in self._ras])
+        
+    def get_left_arm_q(self):
+        """Return current left arm joint angles as np.ndarray shape (5,)."""
+        return np.array([s.getValue() if s else 0. for s in self._las])
 
     # ── Gripper ───────────────────────────────────────────────────────────────
 
@@ -575,36 +926,179 @@ class PR2Controller:
 
 
 def load_environment_map():
+    print("running func")
     with open('environment_map.json', 'r') as file:
             # json.load() parses the file and returns a dict or list
+            print("opened file")
             return json.load(file)
-
+def wrap_to_pi(angle):
+    return((angle + np.pi) % (2*np.pi) - np.pi)
 
 def navigate_to_goal(pr2, goal_x, goal_y, goal_yaw, env_map):
-    raise NotImplementedError("TODO 8: Implement navigate_to_goal()")
+    robot_x, robot_y, robot_yaw = pr2.get_pose()
+    start_xy = [robot_x, robot_y]
+    goal_xy = [goal_x, goal_y]
+    
+    grid, start_grid, goal_grid = build_grid(env_map, start_xy, goal_xy)
+    print("build grid working")
+    plot_grid(grid, start_grid, goal_grid, path=None, expanded=None,title="Grid with A* Path")
+    path, expanded, cost = astar(grid, start_grid, goal_grid, h_euclidean)
+    plot_grid(grid, start_grid, goal_grid, path=path, expanded=expanded,title="Grid with A* Path")
+    if path is None:
+        print("No path was found")
+        return
+    waypoints = [grid_to_world(cell) for cell in path]
 
+
+    # print(f"waypoints:\n {waypoints[:,1]}, {waypoints[:,2]}")
+    for wp_x, wp_y in waypoints:
+        while pr2.step():
+            robot_x, robot_y, robot_yaw = pr2.get_pose()
+            # print(f"robot_x: {robot_x} robot_y: {robot_y} robot_yaw: {robot_yaw}")
+            delta_x = wp_x - robot_x
+            delta_y = wp_y - robot_y
+            dist = np.sqrt(delta_x**2 +  delta_y**2)
+            dir = np.atan2(delta_y, delta_x)
+            # print(f"robot yaw: {round(robot_yaw,3)}, desired dir: {round(dir,3)}")
+            heading = wrap_to_pi(dir - robot_yaw)
+            if dist < 0.1:
+                pr2.stop()
+                break
+            elif abs(heading) > 0.1:
+                pr2.stop()
+                pr2.rotate_in_place(heading)
+                # sign_heading = np.sign(heading)
+                # vL = -sign_heading*0.7*MAX_WHEEL_SPEED
+                # vR = sign_heading*0.7*MAX_WHEEL_SPEED
+                # pr2.set_wheel_speeds(vL, vR)
+                
+            else:
+                vL = 1*MAX_WHEEL_SPEED
+                vR = 1*MAX_WHEEL_SPEED
+                pr2.set_wheel_speeds(vL, vR)
+                
+    while pr2.step():
+        robot_x, robot_y, robot_yaw = pr2.get_pose()
+        heading = wrap_to_pi(goal_yaw - robot_yaw)
+        
+        if abs(heading) > 0.02:
+            pr2.stop()
+            pr2.rotate_in_place(heading)
+        else:
+            pr2.stop()
+            break
+            
+def plot_potential_field_snapshot(robot_x, robot_y, robot_yaw,
+                                   goal_x, goal_y,
+                                   lidar_ranges, lidar_fov):
+    # ── Attractive force (robot local frame)
+    dx_world = goal_x - robot_x
+    dy_world = goal_y - robot_y
+    dist = math.sqrt(dx_world**2 + dy_world**2)
+
+    cos_y = math.cos(-robot_yaw)
+    sin_y = math.sin(-robot_yaw)
+    dx_local = cos_y * dx_world - sin_y * dy_world
+    dy_local = sin_y * dx_world + cos_y * dy_world
+
+    att_scale = K_ATT * min(dist, D0) / dist
+    F_att_x = att_scale * dx_local
+    F_att_y = att_scale * dy_local
+
+    # ── Repulsive forces + obstacle points
+    F_rep_x, F_rep_y = 0.0, 0.0
+    obs_local_xs, obs_local_ys = [], []
+
+    n_rays = len(lidar_ranges)
+    if n_rays > 1:
+        angle_start = -lidar_fov / 2.0
+        angle_step  =  lidar_fov / (n_rays - 1)
+        for i, r in enumerate(lidar_ranges):
+            if math.isnan(r) or math.isinf(r) or r < 0.05:
+                continue
+            ray_angle = angle_start + i * angle_step
+            ox = math.cos(ray_angle)
+            oy = math.sin(ray_angle)
+
+            # Obstacle point in local frame
+            obs_local_xs.append(r * ox)
+            obs_local_ys.append(r * oy)
+
+            if r < D0:
+                rep_mag = K_REP * (1.0/r - 1.0/D0) / (r**2)
+                F_rep_x -= rep_mag * ox
+                F_rep_y -= rep_mag * oy
+
+    Fx = F_att_x + F_rep_x
+    Fy = F_att_y + F_rep_y
+    
+    
+    fig, ax = plt.subplots(figsize=(8, 8))
+
+    # Obstacles
+    ax.scatter(obs_local_xs, obs_local_ys,
+               c='red', s=15, zorder=3, label='Lidar obstacles')
+
+    # Influence radius
+    circle = plt.Circle((0, 0), D0, color='gray', fill=False,
+                         linestyle='--', linewidth=0.8,
+                         label=f'Influence radius D0={D0}m')
+    ax.add_patch(circle)
+
+    # Forces
+    arrow_kw = dict(head_width=0.08, head_length=0.05,
+                    length_includes_head=True)
+    scale = 0.4
+    ax.arrow(0, 0, F_att_x*scale, F_att_y*scale * 1.5,
+             fc='green', ec='green', **arrow_kw, label='Attractive')
+    ax.arrow(0, 0, F_rep_x*scale, F_rep_y*scale * 0.5,
+             fc='orange', ec='orange', **arrow_kw, label='Repulsive (sum)')
+
+    # Robot at origin, forward = +X
+    ax.plot(0, 0, 'bs', markersize=12, label='Robot')
+    ax.arrow(0, 0, 0.3, 0, fc='black', ec='black',
+             head_width=0.04, head_length=0.03,
+             length_includes_head=True, label='Forward (+X)')
+
+    # Goal in local frame
+    ax.plot(dx_local, dy_local, 'g*', markersize=14, label='Goal')
+
+    ax.set_aspect('equal')
+    ax.set_xlim(-D0*1.5, D0*1.5)
+    ax.set_ylim(-D0*1.5, D0*1.5)
+    ax.legend(loc='upper right', fontsize=8)
+    ax.set_title('Potential field snapshot — robot local frame\n'
+                 f'robot=({robot_x:.2f},{robot_y:.2f}) '
+                 f'yaw={math.degrees(robot_yaw):.1f}°')
+    ax.set_xlabel('Local X — forward (m)')
+    ax.set_ylabel('Local Y — left (m)')
+    plt.tight_layout()
+    plt.savefig('potential_field_snapshot.png', dpi=150)
+    plt.close()
+    print("[plot] Saved potential_field_snapshot.png")
+        
+            
+            
+        
+        
+        
+        
 
 #Do not modify the main
 def main():
     pr2 = PR2Controller()
     env = load_environment_map()
-    
-    print(env)
 
     objects    = env.get("pick_objects",    {})
     nav_goals  = env.get("navigation_goals", {})
     place_zone = env.get("place_zone",      {})
-    
-    print(f"printing objs: {objects}")
 
     # ── Pick OBJECT_1 ─────────────────────────────────────────────────────────
-    if "OBJECT_2" in objects:
-        # g1 = nav_goals["OBJECT_1"]
-        # navigate_to_goal(pr2, g1["position"][0], g1["position"][1],
-                         # g1["yaw_radians"], env)
-        print("Picking up object")
-        pick_object(pr2, objects["OBJECT_2"])
-        print("done")
+    if "OBJECT_1" in objects:
+        g1 = nav_goals["OBJECT_1"]
+        navigate_to_goal(pr2, g1["position"][0], g1["position"][1],
+                         g1["yaw_radians"], env)
+        pick_object(pr2, objects["OBJECT_1"])
 
     # ── Pick OBJECT_2 ─────────────────────────────────────────────────────────
     if "OBJECT_2" in objects:
@@ -624,5 +1118,24 @@ def main():
     print(f"[Lab7] Collision penalty: -{pr2.get_collision_count() * 5} pts")
     while pr2.step():
         pass
+
+def main2():
+    pr2 = PR2Controller()
+    env = load_environment_map()
+
+    objects    = env.get("pick_objects",    {})
+    nav_goals  = env.get("navigation_goals", {})
+    place_zone = env.get("place_zone",      {})
+    pr2.step()
+    robot_x, robot_y, robot_yaw = pr2.get_pose()
+    lidar_ranges, lidar_fov = pr2.get_lidar()
+    g1 = nav_goals["OBJECT_1"]
+    goal_x, goal_y = g1["position"][0], g1["position"][1]
+
+    plot_potential_field_snapshot(robot_x, robot_y, robot_yaw,
+                                  goal_x, goal_y,
+                                  lidar_ranges, lidar_fov)
+    
+
 if __name__ == "__main__":
-    main()
+    main2()
